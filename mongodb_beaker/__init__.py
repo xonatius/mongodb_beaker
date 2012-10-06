@@ -187,7 +187,7 @@ before upgrading to 0.5+ and be aware that it will generate new caches.
 import logging
 from beaker.container import NamespaceManager, Container
 from beaker.exceptions import InvalidCacheBackendError, MissingCacheParameter
-from beaker.synchronization import file_synchronizer
+from beaker.synchronization import null_synchronizer, file_synchronizer
 from beaker.util import verify_directory, SyncDict
 
 from StringIO import StringIO
@@ -205,15 +205,20 @@ except ImportError:
 
 log = logging.getLogger(__name__)
 
+
+class ImproperlyConfigured(Exception):
+    pass
+
 class MongoDBNamespaceManager(NamespaceManager):
     clients = SyncDict()
     _pickle = True
     _sparse = False
+    _use_file_lock = False
 
     # TODO _- support write concern / safe
     def __init__(self, namespace, url=None, data_dir=None,
                  lock_dir=None, skip_pickle=False, 
-                 sparse_collection=False, **params):
+                 sparse_collection=False, use_file_lock=False, **params):
         NamespaceManager.__init__(self, namespace)
 
         if not url:
@@ -226,6 +231,10 @@ class MongoDBNamespaceManager(NamespaceManager):
         if sparse_collection:
             log.info("Separating data to one row per key (sparse collection) for ns %s ." % self.namespace)
             self._sparse = True
+
+        if use_file_lock:
+            log.info("Enabling file_locks for namespace: %s" % self.namespace)
+            self._use_file_lock = True
 
         # Temporarily uses a local copy of the functions until pymongo upgrades to new parser code
         (host_list, database, username, password, collection, options) = _parse_uri(url)
@@ -240,7 +249,10 @@ class MongoDBNamespaceManager(NamespaceManager):
             self.lock_dir = lock_dir
         elif data_dir:
             self.lock_dir = data_dir + "/container_mongodb_lock"
-        if self.lock_dir:
+        elif self._use_file_lock:
+            raise ImproperlyConfigured("Neither data_dir nor lock_dir are specified, while use_file_lock is set to True")
+            
+        if self._use_file_lock and self.lock_dir:
             verify_directory(self.lock_dir)
 
         def _create_mongo_conn():
@@ -263,12 +275,12 @@ class MongoDBNamespaceManager(NamespaceManager):
                     _create_mongo_conn)
 
     def get_creation_lock(self, key):
-        """@TODO - stop hitting filesystem for this...
-        I think mongo can properly avoid dog piling for us.
-        """
-        return file_synchronizer(
-            identifier = "mongodb_container/funclock/%s" % self.namespace,
-            lock_dir = self.lock_dir)
+        if self._use_file_lock:
+            return file_synchronizer(
+                identifier = "mongodb_container/funclock/%s" % self.namespace,
+                lock_dir = self.lock_dir)
+        else:
+            return null_synchronizer
 
     def do_remove(self):
         """Clears the entire filesystem (drops the collection)"""
